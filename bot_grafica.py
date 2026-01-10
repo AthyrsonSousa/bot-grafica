@@ -72,10 +72,10 @@ def salvar_no_google(dados):
             dados['Data Entrega']
         ]
         sheet.append_row(nova_linha)
-        return True
+        return "Sucesso"  # Retorna texto de sucesso
     except Exception as e:
-        print(f"Erro ao salvar: {e}")
-        return False
+        print(f"Erro detalhado: {e}")
+        return f"ERRO: {str(e)}"  # Retorna o texto do erro real
 
 # --- Fluxo do Bot (Igual ao anterior) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -110,14 +110,21 @@ async def receber_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'Data Entrega': data_entrega.strftime("%d/%m/%Y")
         }
         
-        await update.message.reply_text("Salvando...")
-        if salvar_no_google(dados):
-            await update.message.reply_text(f"✅ Salvo! Entrega: {dados['Data Entrega']}")
+        await update.message.reply_text("⏳ Tentando salvar no Google Sheets...")
+        
+        # Chama a função e guarda o resultado (que pode ser Sucesso ou Erro)
+        resultado = salvar_no_google(dados)
+        
+        if resultado == "Sucesso":
+            await update.message.reply_text(f"✅ Salvo com sucesso!\nEntrega: {dados['Data Entrega']}")
         else:
-            await update.message.reply_text("❌ Erro ao salvar.")
+            # AQUI ESTÁ O SEGREDO: Ele vai te mostrar o erro técnico
+            await update.message.reply_text(f"❌ Ocorreu um erro técnico:\n\n`{resultado}`", parse_mode="Markdown")
+            
         return ConversationHandler.END
+
     except ValueError:
-        await update.message.reply_text("Data inválida.")
+        await update.message.reply_text("Data inválida. Use DD/MM/AAAA.")
         return DATA_PEDIDO
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -164,3 +171,4 @@ if __name__ == '__main__':
     
     application.add_handler(conv_handler)
     application.run_polling()
+
