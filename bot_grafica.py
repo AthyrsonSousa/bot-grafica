@@ -125,12 +125,30 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 if __name__ == '__main__':
-    # Inicia o servidor web falso em outra thread
+    # Inicia o servidor web falso
     keep_alive()
     
     # Pega o Token da variável de ambiente
-    TOKEN = os.environ.get("8549312365:AAF4tGoC6-l-07YeB_jLrR9kec0TFK5lsxo")
+    TOKEN = os.environ.get("TELEGRAM_TOKEN")
     
+    # --- ÁREA DE DEBUG (O ESPIÃO) ---
+    print("--- INICIANDO DEBUG DO TOKEN ---")
+    if TOKEN is None:
+        print("ERRO CRÍTICO: A variável TELEGRAM_TOKEN não existe ou está vazia!")
+    else:
+        print(f"DEBUG: O Token foi lido com sucesso.")
+        print(f"DEBUG: Tamanho do Token: {len(TOKEN)} caracteres")
+        # Mostra o primeiro e ultimo caractere para vermos se tem aspas ou espaços
+        print(f"DEBUG: O Token começa com: '{TOKEN[:2]}'") 
+        print(f"DEBUG: O Token termina com: '{TOKEN[-2:]}'")
+        
+        # Verifica se tem espaços em branco
+        if " " in TOKEN:
+             print("ERRO CRÍTICO: O Token contém espaços em branco! Remova-os no Render.")
+    print("--- FIM DO DEBUG ---")
+    # -------------------------------
+
+    # Se o token for inválido, o código vai quebrar na linha abaixo
     application = ApplicationBuilder().token(TOKEN).build()
     
     conv_handler = ConversationHandler(
