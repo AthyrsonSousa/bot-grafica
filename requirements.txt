@@ -1,7 +1,5 @@
 python-telegram-bot
-gspread
-oauth2client
+supabase
+flask
 pandas
 openpyxl
-google-auth
-flask
