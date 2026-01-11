@@ -1,23 +1,20 @@
 import logging
 import os
-import json
-import gspread
-from google.oauth2.service_account import Credentials  # Biblioteca Moderna
 from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters, ConversationHandler
 from flask import Flask
 from threading import Thread
+from supabase import create_client, Client # Nova biblioteca
 
-# --- Configuração do Web Server (Para manter o Render acordado) ---
+# --- Configuração do Web Server (Keep Alive) ---
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "Estou vivo! O Bot está rodando."
+    return "Bot Supabase Online!"
 
 def run():
-    # Pega a porta que o Render definir ou usa 8080
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
@@ -33,69 +30,51 @@ logging.basicConfig(
 
 NOME, QUANTIDADE, MATERIAL, DATA_PEDIDO = range(4)
 
-def conectar_gsheets():
-    # 1. Pega o JSON da variável de ambiente
-    creds_json = os.environ.get("GOOGLE_CREDENTIALS")
+# --- Conexão Supabase ---
+def conectar_supabase():
+    url = os.environ.get("SUPABASE_URL")
+    key = os.environ.get("SUPABASE_KEY")
     
-    if not creds_json:
-        raise ValueError("A variável GOOGLE_CREDENTIALS não foi encontrada!")
-
-    try:
-        creds_dict = json.loads(creds_json)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"ERRO: O JSON no Render está quebrado ou mal formatado. Detalhe: {e}")
-
-    # 2. O TRATAMENTO DE CHOQUE (Correção do \n para o Render)
-    # Isso garante que a chave privada tenha quebras de linha reais
-    if 'private_key' in creds_dict:
-        chave_original = creds_dict['private_key']
-        # Substitui \\n (texto) por \n (quebra de linha real)
-        creds_dict['private_key'] = chave_original.replace('\\n', '\n')
-
-    # 3. Conexão usando a biblioteca moderna (google.oauth2)
-    scope = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive"
-    ]
+    if not url or not key:
+        raise ValueError("ERRO: As variáveis SUPABASE_URL e SUPABASE_KEY são obrigatórias.")
     
-    # Cria as credenciais
-    creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
-    
-    # Autoriza o gspread
-    client = gspread.authorize(creds)
-    
-    # Substitua pelo nome da sua planilha
-    sheet = client.open("Controle Grafica").sheet1 
-    return sheet
+    return create_client(url, key)
 
+# --- Lógica de Negócio ---
 def calcular_prazo_uteis(data_inicial, dias_uteis):
     dias_adicionados = 0
     data_atual = data_inicial
     while dias_adicionados < dias_uteis:
         data_atual += timedelta(days=1)
-        if data_atual.weekday() < 5:
+        if data_atual.weekday() < 5: # 0=Segunda ... 4=Sexta
             dias_adicionados += 1
     return data_atual
 
-def salvar_no_google(dados):
+def salvar_no_banco(dados):
     try:
-        sheet = conectar_gsheets()
-        nova_linha = [
-            dados['Nome'],
-            dados['Quantidade'],
-            dados['Material'],
-            dados['Data Pedido'],
-            dados['Data Entrega']
-        ]
-        sheet.append_row(nova_linha)
-        return "Sucesso"  # Retorna texto de sucesso
+        supabase = conectar_supabase()
+        
+        # Prepara o dicionário para enviar ao banco
+        # As chaves aqui devem ser IGUAIS aos nomes das colunas no Supabase
+        payload = {
+            "cliente": dados['Nome'],
+            "quantidade": dados['Quantidade'],
+            "material": dados['Material'],
+            "data_pedido": dados['Data Pedido'],
+            "data_entrega": dados['Data Entrega']
+        }
+        
+        # Insere na tabela 'pedidos'
+        response = supabase.table("pedidos").insert(payload).execute()
+        
+        return "Sucesso"
     except Exception as e:
-        print(f"Erro detalhado: {e}")
-        return f"ERRO: {str(e)}"  # Retorna o texto do erro real
+        print(f"Erro Supabase: {e}")
+        return f"ERRO: {str(e)}"
 
-# --- Fluxo do Bot ---
+# --- Fluxo de Conversa ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Olá! Bot da Gráfica online. Qual o **Nome do Cliente**?")
+    await update.message.reply_text("🤖 Olá! Bot da Gráfica (Supabase Edition).\n\nQual o **Nome do Cliente**?")
     return NOME
 
 async def receber_nome(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -115,10 +94,12 @@ async def receber_material(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def receber_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        data_pedido = datetime.strptime(update.message.text, "%d/%m/%Y")
+        texto_data = update.message.text
+        data_pedido = datetime.strptime(texto_data, "%d/%m/%Y")
         data_entrega = calcular_prazo_uteis(data_pedido, 7)
         
-        dados = {
+        # Organiza os dados
+        dados_pedido = {
             'Nome': context.user_data['nome'],
             'Quantidade': context.user_data['quantidade'],
             'Material': context.user_data['material'],
@@ -126,53 +107,37 @@ async def receber_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'Data Entrega': data_entrega.strftime("%d/%m/%Y")
         }
         
-        await update.message.reply_text("⏳ Tentando salvar no Google Sheets...")
+        await update.message.reply_text("⏳ Salvando no banco de dados...")
         
-        # Chama a função e guarda o resultado
-        resultado = salvar_no_google(dados)
+        # Salva no Supabase
+        resultado = salvar_no_banco(dados_pedido)
         
         if resultado == "Sucesso":
-            await update.message.reply_text(f"✅ Salvo com sucesso!\nEntrega: {dados['Data Entrega']}")
+            await update.message.reply_text(
+                f"✅ **Pedido Salvo!**\n\n"
+                f"👤 Cliente: {dados_pedido['Nome']}\n"
+                f"🚚 **Entrega: {dados_pedido['Data Entrega']}**"
+            )
         else:
-            # Mostra o erro técnico se houver falha
-            await update.message.reply_text(f"❌ Ocorreu um erro técnico:\n\n`{resultado}`", parse_mode="Markdown")
+            await update.message.reply_text(f"❌ Erro ao salvar:\n`{resultado}`", parse_mode="Markdown")
             
         return ConversationHandler.END
 
     except ValueError:
-        await update.message.reply_text("Data inválida. Use DD/MM/AAAA.")
+        await update.message.reply_text("⚠️ Data inválida. Use o formato DD/MM/AAAA (ex: 12/05/2026).")
         return DATA_PEDIDO
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Cancelado.")
+    await update.message.reply_text("Operação cancelada.")
     return ConversationHandler.END
 
 if __name__ == '__main__':
-    # Inicia o servidor web falso
     keep_alive()
     
-    # Pega o Token da variável de ambiente
     TOKEN = os.environ.get("TELEGRAM_TOKEN")
     
-    # --- ÁREA DE DEBUG DO TOKEN ---
-    print("--- INICIANDO DEBUG DO TOKEN ---")
-    if TOKEN is None:
-        print("ERRO CRÍTICO: A variável TELEGRAM_TOKEN não existe ou está vazia!")
-    else:
-        print(f"DEBUG: O Token foi lido com sucesso.")
-        print(f"DEBUG: Tamanho do Token: {len(TOKEN)} caracteres")
-        if len(TOKEN) > 4:
-            print(f"DEBUG: O Token começa com: '{TOKEN[:2]}'") 
-            print(f"DEBUG: O Token termina com: '{TOKEN[-2:]}'")
-        
-        if " " in TOKEN:
-             print("ERRO CRÍTICO: O Token contém espaços em branco! Remova-os no Render.")
-    print("--- FIM DO DEBUG ---")
-    # -------------------------------
-
-    # Se o token for inválido, o código vai quebrar na linha abaixo
     if not TOKEN:
-        print("Não foi possível iniciar o bot sem Token.")
+        print("ERRO: Token não encontrado.")
     else:
         application = ApplicationBuilder().token(TOKEN).build()
         
@@ -188,4 +153,6 @@ if __name__ == '__main__':
         )
         
         application.add_handler(conv_handler)
+        
+        print("Bot Supabase rodando...")
         application.run_polling()
