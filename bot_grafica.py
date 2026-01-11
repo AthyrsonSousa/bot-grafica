@@ -1,18 +1,18 @@
 import logging
 import os
 from datetime import datetime, timedelta
-from telegram import Update
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters, ConversationHandler
 from flask import Flask
 from threading import Thread
-from supabase import create_client, Client # Nova biblioteca
+from supabase import create_client, Client
 
-# --- Configuração do Web Server (Keep Alive) ---
+# --- Web Server (Keep Alive) ---
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "Bot Supabase Online!"
+    return "Bot Grafica (Multi-itens) Online!"
 
 def run():
     port = int(os.environ.get("PORT", 8080))
@@ -22,25 +22,46 @@ def keep_alive():
     t = Thread(target=run)
     t.start()
 
-# --- Configurações do Bot ---
+# --- Configurações ---
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 
-NOME, QUANTIDADE, MATERIAL, DATA_PEDIDO = range(4)
+# Estados da conversa
+LOGIN, NOME, DATA_PEDIDO, MATERIAL, QUANTIDADE, DECISAO_MAIS_ITENS = range(6)
 
-# --- Conexão Supabase ---
+# --- Supabase ---
 def conectar_supabase():
     url = os.environ.get("SUPABASE_URL")
     key = os.environ.get("SUPABASE_KEY")
-    
     if not url or not key:
-        raise ValueError("ERRO: As variáveis SUPABASE_URL e SUPABASE_KEY são obrigatórias.")
-    
+        raise ValueError("Faltam variáveis do Supabase")
     return create_client(url, key)
 
-# --- Lógica de Negócio ---
+# --- Segurança ---
+def verificar_funcionario(user_id):
+    try:
+        supabase = conectar_supabase()
+        response = supabase.table("funcionarios").select("*").eq("user_id", user_id).execute()
+        return len(response.data) > 0
+    except Exception as e:
+        print(f"Erro ao verificar funcionario: {e}")
+        return False
+
+def registrar_funcionario(user_id, username):
+    try:
+        supabase = conectar_supabase()
+        supabase.table("funcionarios").insert({
+            "user_id": user_id,
+            "username": username
+        }).execute()
+        return True
+    except Exception as e:
+        print(f"Erro ao registrar: {e}")
+        return False
+
+# --- Lógica de Datas ---
 def calcular_prazo_uteis(data_inicial, dias_uteis):
     dias_adicionados = 0
     data_atual = data_inicial
@@ -50,46 +71,72 @@ def calcular_prazo_uteis(data_inicial, dias_uteis):
             dias_adicionados += 1
     return data_atual
 
-def salvar_no_banco(dados):
+# --- Lógica de Salvamento em Lote ---
+def salvar_carrinho_no_banco(context):
     try:
         supabase = conectar_supabase()
+        dados_gerais = context.user_data
+        carrinho = context.user_data['carrinho']
         
-        # Prepara o dicionário para enviar ao banco
-        # As chaves aqui devem ser IGUAIS aos nomes das colunas no Supabase
-        payload = {
-            "cliente": dados['Nome'],
-            "quantidade": dados['Quantidade'],
-            "material": dados['Material'],
-            "data_pedido": dados['Data Pedido'],
-            "data_entrega": dados['Data Entrega']
-        }
+        lista_para_inserir = []
         
-        # Insere na tabela 'pedidos'
-        response = supabase.table("pedidos").insert(payload).execute()
-        
+        # Prepara cada item do carrinho para ser uma linha no banco
+        for item in carrinho:
+            payload = {
+                "cliente": dados_gerais['nome'],
+                "data_pedido": dados_gerais['data_pedido'],
+                "data_entrega": dados_gerais['data_entrega'],
+                "usuario_telegram": dados_gerais['usuario_telegram'],
+                "material": item['material'],
+                "quantidade": item['quantidade']
+            }
+            lista_para_inserir.append(payload)
+            
+        # Insere todos de uma vez
+        supabase.table("pedidos").insert(lista_para_inserir).execute()
         return "Sucesso"
     except Exception as e:
-        print(f"Erro Supabase: {e}")
         return f"ERRO: {str(e)}"
 
-# --- Fluxo de Conversa ---
+# --- Fluxo do Bot ---
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 Olá! Bot da Gráfica (Supabase Edition).\n\nQual o **Nome do Cliente**?")
-    return NOME
+    # Limpa dados antigos
+    context.user_data.clear()
+    context.user_data['carrinho'] = []
+    
+    user = update.message.from_user
+    
+    if verificar_funcionario(user.id):
+        await update.message.reply_text(
+            f"👋 Olá, {user.first_name}!\n"
+            "Vamos abrir um novo pedido (Multi-itens).\n\n"
+            "Qual o **Nome do Cliente**?"
+        )
+        return NOME
+    else:
+        await update.message.reply_text(
+            "🔒 **Acesso Restrito**\nDigite a senha de funcionário:"
+        )
+        return LOGIN
+
+async def verificar_senha(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    senha_digitada = update.message.text
+    senha_correta = os.environ.get("SENHA_FUNCIONARIO")
+    user = update.message.from_user
+    username = f"@{user.username}" if user.username else user.first_name
+    
+    if senha_digitada == senha_correta:
+        registrar_funcionario(user.id, username)
+        await update.message.reply_text("✅ Senha correta! Qual o **Nome do Cliente**?")
+        return NOME
+    else:
+        await update.message.reply_text("❌ Senha incorreta. Tente novamente.")
+        return LOGIN
 
 async def receber_nome(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['nome'] = update.message.text
-    await update.message.reply_text("Qual a **Quantidade**?")
-    return QUANTIDADE
-
-async def receber_quantidade(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['quantidade'] = update.message.text
-    await update.message.reply_text("Qual o **Material**?")
-    return MATERIAL
-
-async def receber_material(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['material'] = update.message.text
-    await update.message.reply_text("Data do Pedido (DD/MM/AAAA):")
+    await update.message.reply_text("📅 Qual a **Data do Pedido** (DD/MM/AAAA)?")
     return DATA_PEDIDO
 
 async def receber_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -98,61 +145,106 @@ async def receber_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data_pedido = datetime.strptime(texto_data, "%d/%m/%Y")
         data_entrega = calcular_prazo_uteis(data_pedido, 7)
         
-        # Organiza os dados
-        dados_pedido = {
-            'Nome': context.user_data['nome'],
-            'Quantidade': context.user_data['quantidade'],
-            'Material': context.user_data['material'],
-            'Data Pedido': data_pedido.strftime("%d/%m/%Y"),
-            'Data Entrega': data_entrega.strftime("%d/%m/%Y")
-        }
+        user = update.message.from_user
+        username = f"@{user.username}" if user.username else user.first_name
         
-        await update.message.reply_text("⏳ Salvando no banco de dados...")
+        # Salva os dados "fixos" do pedido
+        context.user_data['data_pedido'] = data_pedido.strftime("%d/%m/%Y")
+        context.user_data['data_entrega'] = data_entrega.strftime("%d/%m/%Y")
+        context.user_data['usuario_telegram'] = username
         
-        # Salva no Supabase
-        resultado = salvar_no_banco(dados_pedido)
+        await update.message.reply_text(
+            f"🗓️ Data registrada.\nEntrega prevista: {context.user_data['data_entrega']}\n\n"
+            "Agora vamos aos itens.\n"
+            "📦 **Digite o nome do 1º Material:**"
+        )
+        return MATERIAL
+        
+    except ValueError:
+        await update.message.reply_text("⚠️ Data inválida. Use DD/MM/AAAA.")
+        return DATA_PEDIDO
+
+async def receber_material(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Guarda o material temporariamente
+    context.user_data['temp_material'] = update.message.text
+    await update.message.reply_text(f"🔢 Qual a **Quantidade** para '{update.message.text}'?")
+    return QUANTIDADE
+
+async def receber_quantidade(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    qtd = update.message.text
+    material = context.user_data['temp_material']
+    
+    # Adiciona ao carrinho
+    context.user_data['carrinho'].append({
+        'material': material,
+        'quantidade': qtd
+    })
+    
+    # Cria botões para Sim/Não
+    teclado = [['SIM', 'NÃO']]
+    reply_markup = ReplyKeyboardMarkup(teclado, one_time_keyboard=True, resize_keyboard=True)
+    
+    await update.message.reply_text(
+        f"✅ Item adicionado: **{qtd}x {material}**\n\n"
+        "➕ **Deseja adicionar mais algum material neste pedido?**",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+    return DECISAO_MAIS_ITENS
+
+async def decidir_mais_itens(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    resposta = update.message.text.upper()
+    
+    if resposta == 'SIM':
+        await update.message.reply_text("📦 Digite o nome do **próximo Material**:", reply_markup=ReplyKeyboardRemove())
+        return MATERIAL
+    
+    else:
+        # Finalizar Pedido
+        await update.message.reply_text("⏳ Finalizando e salvando pedido...", reply_markup=ReplyKeyboardRemove())
+        
+        resultado = salvar_carrinho_no_banco(context)
+        
+        carrinho = context.user_data['carrinho']
+        resumo_itens = "\n".join([f"- {item['quantidade']}x {item['material']}" for item in carrinho])
         
         if resultado == "Sucesso":
             await update.message.reply_text(
-                f"✅ **Pedido Salvo!**\n\n"
-                f"👤 Cliente: {dados_pedido['Nome']}\n"
-                f"🚚 **Entrega: {dados_pedido['Data Entrega']}**"
+                f"✅ **Pedido Salvo com Sucesso!**\n\n"
+                f"👤 Cliente: {context.user_data['nome']}\n"
+                f"🚚 Entrega: {context.user_data['data_entrega']}\n\n"
+                f"🛒 **Itens:**\n{resumo_itens}\n\n"
+                f"Digite /start para novo cliente."
             )
         else:
-            await update.message.reply_text(f"❌ Erro ao salvar:\n`{resultado}`", parse_mode="Markdown")
+            await update.message.reply_text(f"❌ Erro ao salvar:\n{resultado}")
             
         return ConversationHandler.END
 
-    except ValueError:
-        await update.message.reply_text("⚠️ Data inválida. Use o formato DD/MM/AAAA (ex: 12/05/2026).")
-        return DATA_PEDIDO
-
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Operação cancelada.")
+    await update.message.reply_text("Operação cancelada.", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
 if __name__ == '__main__':
     keep_alive()
-    
     TOKEN = os.environ.get("TELEGRAM_TOKEN")
     
-    if not TOKEN:
-        print("ERRO: Token não encontrado.")
-    else:
+    if TOKEN:
         application = ApplicationBuilder().token(TOKEN).build()
         
         conv_handler = ConversationHandler(
             entry_points=[CommandHandler('start', start)],
             states={
-                NOME: [MessageHandler(filters.TEXT, receber_nome)],
-                QUANTIDADE: [MessageHandler(filters.TEXT, receber_quantidade)],
-                MATERIAL: [MessageHandler(filters.TEXT, receber_material)],
-                DATA_PEDIDO: [MessageHandler(filters.TEXT, receber_data)],
+                LOGIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, verificar_senha)],
+                NOME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_nome)],
+                DATA_PEDIDO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_data)],
+                MATERIAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_material)],
+                QUANTIDADE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_quantidade)],
+                DECISAO_MAIS_ITENS: [MessageHandler(filters.Regex("^(SIM|sim|NÃO|não|NAO|nao)$"), decidir_mais_itens)]
             },
             fallbacks=[CommandHandler('cancel', cancel)]
         )
         
         application.add_handler(conv_handler)
-        
-        print("Bot Supabase rodando...")
+        print("Bot Carrinho Rodando...")
         application.run_polling()
