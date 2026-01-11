@@ -3,4 +3,5 @@ gspread
 oauth2client
 pandas
 openpyxl
+google-auth
 flask
