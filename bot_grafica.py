@@ -2,7 +2,7 @@ import logging
 import os
 import json
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials  # Biblioteca Moderna
 from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters, ConversationHandler
@@ -34,18 +34,34 @@ logging.basicConfig(
 NOME, QUANTIDADE, MATERIAL, DATA_PEDIDO = range(4)
 
 def conectar_gsheets():
-    # AQUI ESTÁ O TRUQUE: Pegamos as credenciais da variável de ambiente, não de um arquivo
+    # 1. Pega o JSON da variável de ambiente
     creds_json = os.environ.get("GOOGLE_CREDENTIALS")
     
     if not creds_json:
         raise ValueError("A variável GOOGLE_CREDENTIALS não foi encontrada!")
 
-    creds_dict = json.loads(creds_json)
+    try:
+        creds_dict = json.loads(creds_json)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"ERRO: O JSON no Render está quebrado ou mal formatado. Detalhe: {e}")
+
+    # 2. O TRATAMENTO DE CHOQUE (Correção do \n para o Render)
+    # Isso garante que a chave privada tenha quebras de linha reais
+    if 'private_key' in creds_dict:
+        chave_original = creds_dict['private_key']
+        # Substitui \\n (texto) por \n (quebra de linha real)
+        creds_dict['private_key'] = chave_original.replace('\\n', '\n')
+
+    # 3. Conexão usando a biblioteca moderna (google.oauth2)
+    scope = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
     
-    scope = ["https://spreadsheets.google.com/feeds", 'https://www.googleapis.com/auth/spreadsheets',
-             "https://www.googleapis.com/auth/drive.file", "https://www.googleapis.com/auth/drive"]
+    # Cria as credenciais
+    creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
     
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    # Autoriza o gspread
     client = gspread.authorize(creds)
     
     # Substitua pelo nome da sua planilha
@@ -77,7 +93,7 @@ def salvar_no_google(dados):
         print(f"Erro detalhado: {e}")
         return f"ERRO: {str(e)}"  # Retorna o texto do erro real
 
-# --- Fluxo do Bot (Igual ao anterior) ---
+# --- Fluxo do Bot ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Olá! Bot da Gráfica online. Qual o **Nome do Cliente**?")
     return NOME
@@ -112,13 +128,13 @@ async def receber_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text("⏳ Tentando salvar no Google Sheets...")
         
-        # Chama a função e guarda o resultado (que pode ser Sucesso ou Erro)
+        # Chama a função e guarda o resultado
         resultado = salvar_no_google(dados)
         
         if resultado == "Sucesso":
             await update.message.reply_text(f"✅ Salvo com sucesso!\nEntrega: {dados['Data Entrega']}")
         else:
-            # AQUI ESTÁ O SEGREDO: Ele vai te mostrar o erro técnico
+            # Mostra o erro técnico se houver falha
             await update.message.reply_text(f"❌ Ocorreu um erro técnico:\n\n`{resultado}`", parse_mode="Markdown")
             
         return ConversationHandler.END
@@ -138,37 +154,38 @@ if __name__ == '__main__':
     # Pega o Token da variável de ambiente
     TOKEN = os.environ.get("TELEGRAM_TOKEN")
     
-    # --- ÁREA DE DEBUG (O ESPIÃO) ---
+    # --- ÁREA DE DEBUG DO TOKEN ---
     print("--- INICIANDO DEBUG DO TOKEN ---")
     if TOKEN is None:
         print("ERRO CRÍTICO: A variável TELEGRAM_TOKEN não existe ou está vazia!")
     else:
         print(f"DEBUG: O Token foi lido com sucesso.")
         print(f"DEBUG: Tamanho do Token: {len(TOKEN)} caracteres")
-        # Mostra o primeiro e ultimo caractere para vermos se tem aspas ou espaços
-        print(f"DEBUG: O Token começa com: '{TOKEN[:2]}'") 
-        print(f"DEBUG: O Token termina com: '{TOKEN[-2:]}'")
+        if len(TOKEN) > 4:
+            print(f"DEBUG: O Token começa com: '{TOKEN[:2]}'") 
+            print(f"DEBUG: O Token termina com: '{TOKEN[-2:]}'")
         
-        # Verifica se tem espaços em branco
         if " " in TOKEN:
              print("ERRO CRÍTICO: O Token contém espaços em branco! Remova-os no Render.")
     print("--- FIM DO DEBUG ---")
     # -------------------------------
 
     # Se o token for inválido, o código vai quebrar na linha abaixo
-    application = ApplicationBuilder().token(TOKEN).build()
-    
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('start', start)],
-        states={
-            NOME: [MessageHandler(filters.TEXT, receber_nome)],
-            QUANTIDADE: [MessageHandler(filters.TEXT, receber_quantidade)],
-            MATERIAL: [MessageHandler(filters.TEXT, receber_material)],
-            DATA_PEDIDO: [MessageHandler(filters.TEXT, receber_data)],
-        },
-        fallbacks=[CommandHandler('cancel', cancel)]
-    )
-    
-    application.add_handler(conv_handler)
-    application.run_polling()
-
+    if not TOKEN:
+        print("Não foi possível iniciar o bot sem Token.")
+    else:
+        application = ApplicationBuilder().token(TOKEN).build()
+        
+        conv_handler = ConversationHandler(
+            entry_points=[CommandHandler('start', start)],
+            states={
+                NOME: [MessageHandler(filters.TEXT, receber_nome)],
+                QUANTIDADE: [MessageHandler(filters.TEXT, receber_quantidade)],
+                MATERIAL: [MessageHandler(filters.TEXT, receber_material)],
+                DATA_PEDIDO: [MessageHandler(filters.TEXT, receber_data)],
+            },
+            fallbacks=[CommandHandler('cancel', cancel)]
+        )
+        
+        application.add_handler(conv_handler)
+        application.run_polling()
